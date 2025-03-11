@@ -86,4 +86,4 @@ tb_empregado e
 inner join
 tb_cargo c on (e.fk_cargo= c.id_cargo)
 inner join 
-tb_departamento d on (e.fk_departamento = d.id_departamento) 
+tb_departamento d on (e.fk_departamento = d.id_departamento) .
