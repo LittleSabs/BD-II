@@ -1,0 +1,286 @@
+-- --------------------------------------------------------
+-- SISTEMA DE GESTÃO DE RESIDÊNCIA MÉDICA – FIOCRUZ
+-- Baseado na Lei 6.932/1981 e Decreto 80.281/1977
+-- --------------------------------------------------------
+
+-- ======================
+-- TABELAS PRINCIPAIS
+-- ======================
+
+CREATE TABLE instituicao (
+    id_instituicao INT AUTO_INCREMENT PRIMARY KEY,
+    nome VARCHAR(150) NOT NULL,
+    cnpj CHAR(14) UNIQUE NOT NULL,
+    endereco VARCHAR(255),
+    status_credenciamento ENUM('Ativo', 'Inativo') NOT NULL
+);
+
+CREATE TABLE medico (
+    id_medico INT AUTO_INCREMENT PRIMARY KEY,
+    nome VARCHAR(150) NOT NULL,
+    crm VARCHAR(20) UNIQUE NOT NULL,
+    especialidade VARCHAR(100),
+    tipo ENUM('Residente', 'Supervisor') NOT NULL
+);
+
+CREATE TABLE programa_residencia (
+    id_programa INT AUTO_INCREMENT PRIMARY KEY,
+    especialidade VARCHAR(100) NOT NULL,
+    duracao_anos INT NOT NULL CHECK (duracao_anos >= 2),
+    carga_horaria_semanal INT NOT NULL CHECK (carga_horaria_semanal >= 60),
+    id_instituicao INT NOT NULL,
+    id_supervisor INT NOT NULL,
+    FOREIGN KEY (id_instituicao) REFERENCES instituicao(id_instituicao),
+    FOREIGN KEY (id_supervisor) REFERENCES medico(id_medico)
+);
+
+CREATE TABLE vinculo_residente (
+    id_vinculo INT AUTO_INCREMENT PRIMARY KEY,
+    id_medico INT NOT NULL,
+    id_programa INT NOT NULL,
+    data_inicio DATE NOT NULL,
+    data_fim DATE,
+    UNIQUE (id_medico),
+    FOREIGN KEY (id_medico) REFERENCES medico(id_medico),
+    FOREIGN KEY (id_programa) REFERENCES programa_residencia(id_programa)
+);
+
+CREATE TABLE bolsa (
+    id_bolsa INT AUTO_INCREMENT PRIMARY KEY,
+    id_vinculo INT NOT NULL,
+    valor DECIMAL(10,2) NOT NULL,
+    mes_referencia DATE NOT NULL,
+    status_pagamento ENUM('Pago', 'Pendente') NOT NULL,
+    FOREIGN KEY (id_vinculo) REFERENCES vinculo_residente(id_vinculo)
+);
+
+CREATE TABLE avaliacao_programa (
+    id_avaliacao INT AUTO_INCREMENT PRIMARY KEY,
+    id_programa INT NOT NULL,
+    id_medico INT NOT NULL,
+    tipo_avaliador ENUM('Residente', 'Supervisor') NOT NULL,
+    nota TINYINT NOT NULL CHECK (nota BETWEEN 0 AND 10),
+    comentario TEXT,
+    FOREIGN KEY (id_programa) REFERENCES programa_residencia(id_programa),
+    FOREIGN KEY (id_medico) REFERENCES medico(id_medico)
+);
+
+CREATE TABLE historico_atividade (
+    id_historico INT AUTO_INCREMENT PRIMARY KEY,
+    id_vinculo INT NOT NULL,
+    descricao TEXT NOT NULL,
+    data_atividade DATE NOT NULL,
+    carga_horaria_dia INT NOT NULL,
+    FOREIGN KEY (id_vinculo) REFERENCES vinculo_residente(id_vinculo)
+);
+
+CREATE TABLE cnrm (
+    id_cnrm INT AUTO_INCREMENT PRIMARY KEY,
+    nome VARCHAR(150) NOT NULL,
+    descricao_atribuicao TEXT
+);
+
+-- ======================
+-- ÍNDICES
+-- ======================
+CREATE INDEX idx_programa_especialidade ON programa_residencia(especialidade);
+CREATE INDEX idx_medico_tipo ON medico(tipo);
+CREATE INDEX idx_bolsa_mes ON bolsa(mes_referencia);
+
+-- ======================
+-- VIEWS GERENCIAIS
+-- ======================
+
+CREATE VIEW view_residentes_ativos_por_instituicao AS
+SELECT i.nome AS instituicao, COUNT(*) AS total_residentes
+FROM vinculo_residente vr
+JOIN programa_residencia p ON vr.id_programa = p.id_programa
+JOIN instituicao i ON p.id_instituicao = i.id_instituicao
+WHERE vr.data_fim IS NULL
+GROUP BY i.nome;
+
+CREATE VIEW view_supervisores_com_residentes AS
+SELECT m.nome AS supervisor, COUNT(vr.id_vinculo) AS total_residentes
+FROM medico m
+JOIN programa_residencia p ON p.id_supervisor = m.id_medico
+LEFT JOIN vinculo_residente vr ON vr.id_programa = p.id_programa
+WHERE m.tipo = 'Supervisor'
+GROUP BY m.nome;
+
+CREATE VIEW view_pagamentos_por_mes AS
+SELECT DATE_FORMAT(mes_referencia, '%Y-%m') AS mes, COUNT(*) AS total_pagamentos, SUM(valor) AS total_pago
+FROM bolsa
+GROUP BY mes;
+
+CREATE VIEW view_programas_em_andamento AS
+SELECT p.*, i.nome AS instituicao
+FROM programa_residencia p
+JOIN instituicao i ON p.id_instituicao = i.id_instituicao;
+
+CREATE VIEW view_avaliacoes_programas AS
+SELECT p.especialidade, a.tipo_avaliador, ROUND(AVG(a.nota),2) AS media_nota
+FROM avaliacao_programa a
+JOIN programa_residencia p ON a.id_programa = p.id_programa
+GROUP BY p.especialidade, a.tipo_avaliador;
+
+-- ======================
+-- FUNCTIONS
+-- ======================
+
+DELIMITER $$
+
+CREATE FUNCTION fn_valida_duracao_programa (duracao INT) RETURNS BOOLEAN
+DETERMINISTIC
+BEGIN
+    RETURN duracao >= 2;
+END$$
+
+CREATE FUNCTION fn_total_bolsa_residente (id_med INT) RETURNS DECIMAL(10,2)
+DETERMINISTIC
+BEGIN
+    DECLARE total DECIMAL(10,2);
+    SELECT SUM(b.valor)
+    INTO total
+    FROM bolsa b
+    JOIN vinculo_residente vr ON b.id_vinculo = vr.id_vinculo
+    WHERE vr.id_medico = id_med;
+    RETURN IFNULL(total, 0);
+END$$
+
+-- ======================
+-- PROCEDURES
+-- ======================
+
+CREATE PROCEDURE sp_gerar_pagamento_bolsa(IN mes_ref DATE)
+BEGIN
+    INSERT INTO bolsa (id_vinculo, valor, mes_referencia, status_pagamento)
+    SELECT vr.id_vinculo, 5000.00, mes_ref, 'Pendente'
+    FROM vinculo_residente vr
+    WHERE vr.data_fim IS NULL;
+END$$
+
+CREATE PROCEDURE sp_encerrar_vinculo(IN id_vinculo INT, IN data_final DATE)
+BEGIN
+    UPDATE vinculo_residente
+    SET data_fim = data_final
+    WHERE id_vinculo = id_vinculo;
+END$$
+
+CREATE PROCEDURE sp_cadastrar_programa(
+    IN esp VARCHAR(100), IN duracao INT, IN ch INT,
+    IN inst INT, IN supervisor INT
+)
+BEGIN
+    DECLARE credenciado ENUM('Ativo', 'Inativo');
+    SELECT status_credenciamento INTO credenciado FROM instituicao WHERE id_instituicao = inst;
+    IF credenciado = 'Ativo' AND duracao >= 2 AND ch >= 60 THEN
+        INSERT INTO programa_residencia (especialidade, duracao_anos, carga_horaria_semanal, id_instituicao, id_supervisor)
+        VALUES (esp, duracao, ch, inst, supervisor);
+    END IF;
+END$$
+
+-- ======================
+-- TRIGGERS
+-- ======================
+
+CREATE TRIGGER trg_max_3_residentes
+BEFORE INSERT ON vinculo_residente
+FOR EACH ROW
+BEGIN
+    DECLARE total INT;
+    SELECT COUNT(*) INTO total
+    FROM vinculo_residente vr
+    JOIN programa_residencia p ON vr.id_programa = p.id_programa
+    WHERE p.id_supervisor = (
+        SELECT id_supervisor FROM programa_residencia WHERE id_programa = NEW.id_programa
+    ) AND vr.data_fim IS NULL;
+    IF total >= 3 THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Supervisor já possui 3 residentes ativos.';
+    END IF;
+END$$
+
+CREATE TRIGGER trg_valida_carga_horaria
+BEFORE INSERT ON historico_atividade
+FOR EACH ROW
+BEGIN
+    DECLARE total INT;
+    SELECT SUM(carga_horaria_dia)
+    INTO total
+    FROM historico_atividade
+    WHERE id_vinculo = NEW.id_vinculo
+      AND WEEK(data_atividade) = WEEK(NEW.data_atividade);
+    IF total + NEW.carga_horaria_dia < 60 THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Carga horária semanal inferior a 60 horas.';
+    END IF;
+END$$
+
+CREATE TRIGGER trg_residente_unico
+BEFORE INSERT ON vinculo_residente
+FOR EACH ROW
+BEGIN
+    DECLARE existe INT;
+    SELECT COUNT(*) INTO existe
+    FROM vinculo_residente
+    WHERE id_medico = NEW.id_medico AND data_fim IS NULL;
+    IF existe > 0 THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Residente já possui vínculo ativo.';
+    END IF;
+END$$
+
+DELIMITER ;
+
+-- Instituições
+INSERT INTO instituicao (nome, cnpj, endereco, status_credenciamento) VALUES
+('Hospital das Clínicas de São Paulo', '12345678000199', 'Av. Dr. Arnaldo, 455 - SP', 'Ativo'),
+('Hospital Universitário UFRJ', '98765432000188', 'Av. Carlos Chagas Filho, 373 - RJ', 'Ativo'),
+('Hospital Escola Pelotas', '11122233000177', 'Rua Marechal Deodoro, 1160 - RS', 'Inativo');
+
+-- Médicos (Supervisores)
+INSERT INTO medico (nome, crm, especialidade, tipo) VALUES
+('Dr. João Cardoso', 'CRM1234SP', 'Clínica Médica', 'Supervisor'),
+('Dra. Ana Beatriz', 'CRM5678RJ', 'Pediatria', 'Supervisor');
+
+-- Médicos (Residentes)
+INSERT INTO medico (nome, crm, especialidade, tipo) VALUES
+('Dr. Pedro Silva', 'CRM9012SP', 'Clínica Médica', 'Residente'),
+('Dra. Carla Menezes', 'CRM3456RJ', 'Pediatria', 'Residente'),
+('Dra. Fernanda Lopes', 'CRM7890SP', 'Clínica Médica', 'Residente');
+
+-- Programas de Residência
+INSERT INTO programa_residencia (especialidade, duracao_anos, carga_horaria_semanal, id_instituicao, id_supervisor) VALUES
+('Clínica Médica', 2, 60, 1, 1),
+('Pediatria', 3, 70, 2, 2);
+
+-- Vínculos de Residentes
+INSERT INTO vinculo_residente (id_medico, id_programa, data_inicio, data_fim) VALUES
+(3, 1, '2024-03-01', NULL),
+(4, 2, '2024-03-01', NULL);
+
+-- Histórico de Atividades
+INSERT INTO historico_atividade (id_vinculo, descricao, data_atividade, carga_horaria_dia) VALUES
+(1, 'Plantão noturno', '2024-06-10', 12),
+(1, 'Consulta ambulatorial', '2024-06-11', 10),
+(1, 'Atendimento enfermaria', '2024-06-12', 14),
+(1, 'Seminário clínico', '2024-06-13', 10),
+(1, 'Pronto-socorro', '2024-06-14', 16);
+
+-- Avaliações de Programa
+INSERT INTO avaliacao_programa (id_programa, id_medico, tipo_avaliador, nota, comentario) VALUES
+(1, 3, 'Residente', 9, 'Excelente supervisão e estrutura.'),
+(2, 4, 'Residente', 7, 'Bom programa, mas carga alta.'),
+(1, 1, 'Supervisor', 10, 'Residente muito comprometido.');
+
+-- Bolsas (Exemplo manual ou use a procedure depois)
+INSERT INTO bolsa (id_vinculo, valor, mes_referencia, status_pagamento) VALUES
+(1, 5000.00, '2024-06-01', 'Pago'),
+(2, 5000.00, '2024-06-01', 'Pago');
+
+CALL sp_gerar_pagamento_bolsa('2024-07-01');
+
+SELECT fn_total_bolsa_residente(3);
+
+SELECT * FROM view_residentes_ativos_por_instituicao;
+SELECT * FROM view_supervisores_com_residentes;
+SELECT * FROM view_pagamentos_por_mes;
+
+
